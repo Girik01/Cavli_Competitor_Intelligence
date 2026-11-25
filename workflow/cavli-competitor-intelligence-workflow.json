@@ -1,0 +1,1010 @@
+{
+  "name": "Cavli Cellular IoT Competitor Intelligence",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "2a03142e-e8d5-4ffe-98c8-e9e49470e0cc",
+      "name": "Run Manually (Demo)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "formTitle": "Competitor Intelligence — run a report",
+        "formDescription": "One competitor per line. Optional extras after | : aliases (comma-separated) | official website. Example: Sequans | Monarch 2, Calliope | sequans.com. Known competitors (Quectel, Telit Cinterion, Fibocom, Semtech, Nordic Semiconductor) can be entered by name only. Max 8.",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "Competitors",
+              "fieldType": "textarea",
+              "requiredField": true,
+              "placeholder": "Quectel\nTelit Cinterion\nSequans | Monarch 2 | sequans.com"
+            },
+            {
+              "fieldLabel": "Lookback days",
+              "fieldType": "number",
+              "placeholder": "7"
+            },
+            {
+              "fieldLabel": "Send report to",
+              "fieldType": "email",
+              "placeholder": "you@company.com"
+            }
+          ]
+        },
+        "options": {
+          "respondWithOptions": {
+            "values": {
+              "formSubmittedText": "Thanks! The report is being generated and will be emailed when ready (or open the n8n execution)."
+            }
+          }
+        }
+      },
+      "id": "0d217c30-18a8-45d5-88ca-0840357bcfc0",
+      "name": "Run on Demand (Form)",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [
+        0,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "weeks",
+              "weeksInterval": 1,
+              "triggerAtDay": [
+                1
+              ],
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "id": "30528676-fd49-48fa-aa35-be31031ac9e7",
+      "name": "Weekly Schedule (Mon 08:00)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        400
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ==========================================================================\n//  CONFIG — the only node you normally need to edit.\n//  Everything downstream reads from here: competitors, sources, thresholds,\n//  model choice and the full prompt text (so prompts are visible in the demo).\n// ==========================================================================\nconst settings = {\n  version: '1.15',\n  reportTitle: 'Cellular IoT Competitor Intelligence',\n  cadence: 'Weekly',\n  lookbackDays: 7,\n  significanceThreshold: 3,\n  selfNames: ['Cavli'],          // our own company: routed to 'Cavli in the news', never treated as a competitor\n  filterMode: 'ai',              // 'ai'    = AI judges relevance; code only does date window, dedupe, caps\n                                 // 'rules' = also apply keyword/URL/language filters before AI\n  englishOnly: true,             // drop titles that are mostly non-Latin script      // 1–5. Items below this go to the appendix only\n  maxItemsPerCompetitor: 30,     // cap after dedupe, before AI (cost control)\n  maxMarketItems: 15,\n  triageBatchSize: 12,           // news items per LLM triage call\n  useRunHistory: true,           // cross-run dedupe — applied ONLY on scheduled runs; manual runs always give a full report\n  resetHistory: false,           // set true for one run to wipe the memory of already-reported stories\n  historyRetentionDays: 60,\n  senderEmail: 'Competitor Intelligence <your-sender@gmail.com>',  // MUST match the SMTP credential's User (Gmail sends only as itself)\n  reportRecipients: 'you@example.com',\n  reviewerEmail: 'you@example.com',\n  tavily: {\n    enabled: true,               // extra search source + full-text enrichment\n    maxResultsPerQuery: 10,\n    enrichMinSignificance: 4,    // fetch full article text for items at/above this\n    maxEnrich: 10,               // cost cap (Tavily extract: ~1 credit per 5 URLs)\n  },\n  llm: {\n    // Any OpenAI-compatible Chat Completions endpoint works:\n    //   OpenAI  -> https://api.openai.com/v1\n    //   Gemini  -> https://generativelanguage.googleapis.com/v1beta/openai\n    //   Groq / OpenRouter / local vLLM / Ollama (/v1) also work\n    baseUrl: 'https://api.openai.com/v1',\n    triageModel: 'gpt-6-luna',    // GPT-6 family (Sep 2026): cheap, fast reasoning model for high-volume triage\n    writerModel: 'gpt-6.1-sol',   // GPT-6.1 Sol (Sep 2026): strong reasoning + writing for the final brief\n    temperature: null,            // reasoning models may reject temperature; set a number only for non-reasoning models\n                                  // Fallback if your account lacks access: 'gpt-5.6-luna' / 'gpt-5.6-sol'\n  },\n};\n\n// Edit to match Cavli's public positioning (website / LinkedIn \"About\").\nconst companyContext =\n  'Cavli Wireless is a cellular IoT company with engineering in Kochi, India. ' +\n  'It designs cellular IoT modules (LTE Cat-M / NB-IoT, LTE Cat-1 / Cat-1 bis, Cat-4 and 5G) ' +\n  'with integrated eSIM connectivity, and offers the Cavli Hubble platform for global ' +\n  'connectivity and device management. Key buyers are IoT device OEMs in asset tracking, ' +\n  'smart metering, telematics, POS, healthcare and industrial IoT.';\n\nconst competitors = [\n  { id: 'QUE', officialDomains: ['quectel.com'], name: 'Quectel',\n    aliases: ['Quectel'],\n    query: 'Quectel',\n    focus: 'Largest cellular IoT module vendor by volume; broad LTE/5G/RedCap and GNSS portfolio.' },\n  { id: 'TEL', officialDomains: ['telit.com', 'telitcinterion.com'], name: 'Telit Cinterion',\n    aliases: ['Telit Cinterion', 'Telit', 'Cinterion'],\n    query: '\"Telit Cinterion\" OR \"Telit\" IoT',\n    focus: 'Modules, eSIM/iSIM connectivity and IoT services; strong in industrial and enterprise.' },\n  { id: 'FIB', officialDomains: ['fibocom.com'], name: 'Fibocom',\n    aliases: ['Fibocom'],\n    query: 'Fibocom',\n    focus: 'Cellular modules incl. 5G/RedCap and AI-capable smart modules; strong in automotive/FWA.' },\n  { id: 'SEM', officialDomains: ['semtech.com', 'sierrawireless.com'], name: 'Semtech (Sierra Wireless)',\n    aliases: ['Sierra Wireless', 'Semtech', 'AirPrime', 'AirLink'],\n    query: '\"Sierra Wireless\" OR Semtech cellular OR Semtech IoT',\n    focus: 'Owns Sierra Wireless modules, routers and connectivity. LoRa-only or non-IoT (e.g. data-centre) news is low relevance (max 2).',\n    offTopic: 'LoRa|data cent(er|re)|SiGe|optical|PMIC|power management', onTopic: 'cellular|LTE|5G|AirLink|AirPrime|NB-IoT|LTE-M|module|router' },\n  { id: 'NOR', officialDomains: ['nordicsemi.com'], name: 'Nordic Semiconductor',\n    aliases: ['Nordic Semiconductor', 'nRF91', 'nRF9151', 'nRF9160', 'nRF9161'],\n    query: '\"Nordic Semiconductor\" cellular OR nRF91',\n    focus: 'Low-power LTE-M/NB-IoT SiPs (nRF91 series); competes for low-power tracker designs. Bluetooth/Wi-Fi-only news is low relevance (max 2).',\n    offTopic: 'Bluetooth|BLE|Wi-?Fi|nRF54|nRF52|nRF53|nRF70|Matter|Thread|PMIC', onTopic: 'cellular|LTE|NB-IoT|LTE-M|nRF91|NTN|satellite' },\n];\n\n// Market-wide keywords: industry-feed items are kept if they mention a\n// competitor OR one of these, so \"other significant market developments\" are covered.\nconst marketKeywords = ['cellular IoT', 'LTE-M', 'LTE Cat-M', 'Cat-M1', 'NB-IoT', 'RedCap',\n  'Cat-1 bis', 'Cat 1bis', 'Cat-1bis', 'eSIM', 'iSIM', 'SGP.32', 'LPWA', 'LPWAN',\n  'non-terrestrial', 'NTN', 'satellite IoT', 'IoT module', 'IoT connectivity', '3GPP Release'];\n\nconst marketQuery = '\"cellular IoT\" OR \"IoT module\" OR RedCap OR \"NB-IoT\" OR \"LTE-M\" OR \"SGP.32\"';\n\n// Public RSS feeds of IoT trade publications. Verify each URL opens in a\n// browser before the demo; add/remove freely (WordPress sites use /feed/).\nconst industryFeeds = [\n  { name: 'IoT Business News', url: 'https://iotbusinessnews.com/feed/' },\n];\n\n// Noise filter: syndicated market-research ads, stock chatter, job posts.\nconst noisePatterns = [\n  /\\bmarket (size|share|report|research|analysis|outlook|forecast|trends?|insights?)\\b/,\n  /\\bCAGR\\b/,\n  /\\bforecast(ed)? (period|to|till|through|until) 20\\d\\d\\b/,\n  /\\b(share|stock) price\\b/,\n  /\\bshares? (rose|fell|jumped|dropped|gained|slipped|surged|tumbled|climbed)\\b/,\n  /\\bprice target\\b/,\n  /\\banalysts? (rating|upgrade|downgrade)s?\\b/,\n  /\\b(top|key|leading) (players|companies|vendors|manufacturers) (in|of)\\b/,\n  /\\b(job|career|hiring) (opening|opportunit|vacanc)/,\n  /市場規模|市场规模|市場調査|年平均成長率/,\n  /\\b(estimates|earnings call transcript)\\s*[–-]\\s*[A-Z]{2,5}:\\d+/,\n].map(r => r.source);\n\n// Non-news pages (docs, code, social profiles, support portals) — dropped by URL or title.\nconst junkUrlPatterns = [\n  /linkedin\\.com\\/(company|in)\\//, /facebook\\.com/, /(twitter|x)\\.com\\//, /youtube\\.com/, /instagram\\.com/,\n  /wikipedia\\.org/, /github\\.com|gitlab|git-master|\\/-\\/blob\\//, /\\/(docs?|documentation|manuals?|datasheets?|downloads?|support|resources|reference|careers|jobs|aussteller|exhibitors?)\\//,\n  /^https?:\\/\\/(developer|docs|source|support|forum|community)\\./, /\\.(pdf|zip)(\\?|$)/,\n].map(r => r.source);\nconst junkTitlePatterns = [\n  /\\b(user guide|user manual|hardware design|datasheet|release notes?|application note|reference manual|configuration templates?|getting started|faq)\\b/,\n  /\\|\\s*(company|home|about( us)?|exhibitor|profile|overview)\\s*$/,\n  /\\.(h|c|py|js|json|xml)\\b.*·/, /^[\\w\\s&-]{2,40}$/,   // bare page titles like \"Telit Cinterion\"\n].map(r => r.source);\n// Market items must ALSO contain one of these (stops \"Redcap Tour Co.\" / clinical \"REDCap\").\nconst marketContext = /\\b(IoT|M2M|cellular|module|modules|5G|LTE|eSIM|iSIM|operator|carrier|connectivity|3GPP|chipset)\\b/.source;\n\n// Sources treated as authoritative when picking the representative copy of a story.\nconst preferredDomains = ['quectel.com', 'telit.com', 'telitcinterion.com', 'fibocom.com',\n  'semtech.com', 'sierrawireless.com', 'nordicsemi.com', 'businesswire.com',\n  'prnewswire.com', 'globenewswire.com', 'gsma.com'];\n\n// ------------------- RUN-TIME INPUT (form trigger) -----------------------\n// Scheduled/manual runs use the defaults above. A run started from the\n// \"Run on Demand (Form)\" trigger overrides competitors, lookback and recipient.\nconst trig = ($input.first() && $input.first().json) || {};\nlet runSource = trig['Competitors'] !== undefined ? 'form' : (trig.timestamp || trig['Day of week'] ? 'schedule' : 'manual');\nif (runSource === 'form') {\n  const used = new Set(['MKT', 'SEL']);\n  const makeId = name => {\n    const L = name.toUpperCase().replace(/[^A-Z]/g, '') || 'CMP';\n    const cands = [L.slice(0, 3)];\n    for (let i = 1; i < L.length; i++) for (let j = i + 1; j < L.length; j++) cands.push(L[0] + L[i] + L[j]);\n    for (let k = 0; k < 26 * 26; k++) cands.push(L[0] + String.fromCharCode(65 + Math.floor(k / 26)) + String.fromCharCode(65 + (k % 26)));\n    const id = cands.find(c => c.length === 3 && !used.has(c)); used.add(id); return id;\n  };\n  const lines = String(trig['Competitors'] || '').split(/\\r?\\n/).map(l => l.trim()).filter(Boolean).slice(0, 8);\n  const custom = lines.map(line => {\n    const [namePart, aliasPart = '', domainPart = ''] = line.split('|').map(x => x.trim());\n    const known = competitors.find(c => c.name.toLowerCase() === namePart.toLowerCase() || c.aliases.some(a => a.toLowerCase() === namePart.toLowerCase()));\n    if (known && !aliasPart && !domainPart) { used.add(known.id); return known; }   // reuse curated settings\n    const aliases = [namePart, ...aliasPart.split(',').map(a => a.trim()).filter(Boolean)];\n    return { id: makeId(namePart), name: namePart, aliases,\n      officialDomains: domainPart.split(',').map(d => d.trim().replace(/^https?:\\/\\//, '').replace(/^www\\./, '').replace(/\\/.*$/, '')).filter(Boolean),\n      query: aliases.map(a => (/\\s/.test(a) ? `\"${a}\"` : a)).join(' OR '),\n      focus: 'Competitor entered via the on-demand form; judge relevance to cellular IoT.' };\n  });\n  if (custom.length) competitors.splice(0, competitors.length, ...custom);\n  const lb = Number(trig['Lookback days']); if (lb >= 1 && lb <= 31) settings.lookbackDays = Math.round(lb);\n  if (trig['Send report to']) settings.reportRecipients = String(trig['Send report to']).trim();\n}\n\n// ----------------------------- PROMPTS -----------------------------------\nconst triageSystem = `You are a senior competitive-intelligence analyst for the cellular IoT industry, working for the marketing team of the company described below.\n\nCOMPANY CONTEXT\n${companyContext}\n\nTASK\nYou receive a batch of news items collected automatically from public sources. For EACH item decide whether it is a genuine, relevant development and score its significance to our company. Work ONLY from the title and snippet provided. Never add facts, numbers, names or dates that are not present in the item.\n\nRELEVANCE — set \"relevant\": false when:\n- the competitor is only mentioned in passing (e.g. one name in a long list);\n- it is stock-price commentary, investor-ownership filings or a syndicated \"market research report\" advert;\n- the name refers to a different entity (namesake);\n- the item repeats another item in the same batch (also set \"duplicate_of\" to that item's id);\n- it is not a news item: documentation, user guides, datasheets, release notes, code/repository files, support or download pages, social-media profiles, company \"about\" or exhibitor pages, job postings;\n- it is about something unrelated that merely shares a word (e.g. \"REDCap\" research software, a company named \"Redcap Tour\", a non-IoT business unit) or is a market-research advert in any language;\n- for market-wide items (no competitor), it does not concern cellular IoT connectivity, modules, chipsets, standards or operators.\n\nCATEGORY (exactly one)\nproduct_launch | partnership | technology | corporate | marketing_positioning | financial | market_signal | other\n- product_launch: new/updated modules, chipsets, platforms, SKUs, dev kits\n- partnership: alliances, distribution, operator/carrier deals, ecosystem integrations, named design wins\n- technology: certifications, standards (RedCap, LTE-M, NB-IoT, eSIM/SGP.32, iSIM, NTN), R&D, benchmarks\n- corporate: M&A, leadership changes, restructuring, facilities, regional expansion, litigation\n- marketing_positioning: campaigns, messaging shifts, trade-show presence, awards, thought leadership, pricing moves\n- financial: earnings, guidance, funding (not stock-price chatter)\n- market_signal: industry developments without a specific competitor that affect the cellular IoT market\n- other: anything else\n\nCOMPETITOR FIELD\nSet \"competitor\" to the company the item is actually ABOUT (one of the tracked competitors, exact name), not merely the one in the search hint. If it is about another company or the market in general, use null. If it is about our own company, use \"SELF\".\n\nSIGNIFICANCE (integer 1–5, from OUR company's point of view)\n5 = could change competitive dynamics now: M&A, new module family in our segments, major operator/hyperscaler partnership, entry into India or our key markets, aggressive pricing, major certification win.\n4 = clearly important: notable product update, new certification, named strategic customer/partner, new region, C-level change.\n3 = worth knowing: incremental product news, trade-show announcements, case studies, ecosystem integrations.\n2 = low: generic marketing content, awards, webinars, minor blog posts.\n1 = negligible.\nCalibration: use the full scale — most weeks should contain some 4s. Legal action between major module vendors, quarterly results showing a sharp profit or revenue swing, new module families, and moves into India are 4 or 5.\nMarket research: market-size projections, forecasts and \"key players\" lists from research firms are significance 2 at most, even if they name competitors.\nRecency: if the item only re-describes products launched long ago, is an evergreen blog/explainer, a teardown of an older product, or a reseller/distributor listing, cap significance at 2.\nSource quality: social-media posts (LinkedIn, Facebook, X) by third parties are weak evidence — confidence \"low\" and significance at most 2 unless the post is from the competitor's official account announcing something new.\n\nOUTPUT\nReturn ONLY a JSON object, no prose, no markdown fences:\n{\"items\":[{\n  \"id\": \"<item id exactly as given>\",\n  \"relevant\": true,\n  \"competitor\": \"<competitor name, or null for market-wide items>\",\n  \"category\": \"<one category>\",\n  \"significance\": 3,\n  \"significance_rationale\": \"<max 25 words>\",\n  \"summary\": \"<max 40 words, neutral, facts from the item only>\",\n  \"implication_for_us\": \"<max 30 words: why this matters to our company, or 'Limited direct impact'>\",\n  \"confidence\": \"high | medium | low\",\n  \"evidence_quote\": \"<short phrase copied VERBATIM from the title or snippet that supports the summary>\",\n  \"duplicate_of\": null\n}]}\nReturn exactly one object per input item, in the same order. Use confidence \"low\" when the snippet is too thin to be sure.`;\n\nconst writerSystem = `You are the editor of a recurring competitor-intelligence brief for the marketing and leadership team of the company described below. Your reader is busy: be concise, specific and decision-oriented.\n\nCOMPANY CONTEXT\n${companyContext}\n\nINPUT\nA JSON list of pre-filtered, pre-scored developments. Each has an \"id\" (e.g. \"QUE-3\"), competitor, category, significance (1–5), summary, implication and source. High-significance items may include \"article_excerpt\": the first part of the full article text. When present, prefer it over the summary for concrete details (product names, partners, regions, specs), but still state only what it says.\n\nRULES\n1. Use ONLY the developments provided. Do not add outside knowledge, numbers or claims.\n2. Every statement must be traceable: cite item ids in square brackets, e.g. \"Quectel expanded its RedCap line [QUE-2]\".\n3. Only reference ids that appear in the input. Never invent ids.\n4. Merge items describing the same event into one development (list the others in related_ids). If one event involves two competitors (e.g. a lawsuit), describe it once under the competitor that initiated it and mention it briefly in the other's summary.\n5. Prefer concrete facts over adjectives. No hype, no speculation presented as fact.\n6. Include every tracked competitor. If one has no items, set activity_level \"none\" and developments [].\n7. Recommended actions must be practical for a marketing team (content, messaging, sales enablement, events, product-marketing follow-ups) and tied to specific ids.\n\nOUTPUT — return ONLY this JSON object, no markdown fences:\n{\n  \"headline\": \"<one sentence: the single most important takeaway this period>\",\n  \"executive_summary\": [\"<3–5 bullets, each with [ID] citations>\"],\n  \"competitors\": [{\n    \"name\": \"<competitor name exactly as listed>\",\n    \"activity_level\": \"high | medium | low | none\",\n    \"summary\": \"<1–2 sentences>\",\n    \"developments\": [{\n      \"id\": \"<primary item id>\",\n      \"related_ids\": [],\n      \"headline\": \"<max 12 words>\",\n      \"what_happened\": \"<max 35 words>\",\n      \"why_it_matters\": \"<max 30 words, from our company's perspective>\",\n      \"category\": \"<category>\",\n      \"significance\": 4\n    }]\n  }],\n  \"market_signals\": [{\"text\": \"<max 35 words>\", \"ids\": [\"<id>\"]}],\n  \"themes\": [{\"theme\": \"<max 6 words>\", \"description\": \"<max 35 words>\", \"ids\": [\"<id>\"]}],\n  \"recommended_actions\": [{\"action\": \"<max 25 words>\", \"owner\": \"Marketing | Product Marketing | Sales | Leadership\", \"priority\": \"high | medium | low\", \"ids\": [\"<id>\"]}],\n  \"watchlist\": [\"<max 20 words: what to monitor next period>\"]\n}`;\n\nconst now = new Date();\nreturn [{\n  json: {\n    runId: 'CI-' + now.toISOString().slice(0, 16).replace(/[-:T]/g, ''), runSource,\n    runDate: now.toISOString(),\n    periodStart: new Date(now.getTime() - settings.lookbackDays * 86400000).toISOString(),\n    settings, companyContext, competitors, marketKeywords, marketQuery,\n    industryFeeds, noisePatterns, preferredDomains, junkUrlPatterns, junkTitlePatterns, marketContext,\n    prompts: { triageSystem, writerSystem },\n  },\n}];\n"
+      },
+      "id": "f527971c-af00-4d1f-b5ab-1e6746f6fa97",
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// One request item per (competitor x source) + market-wide sources.\nconst cfg = $('Config').first().json;\nconst days = cfg.settings.lookbackDays;\nconst gnews = q => 'https://news.google.com/rss/search?q=' +\n  encodeURIComponent(`${q} when:${days}d`) + '&hl=en-US&gl=US&ceid=US:en';\nconst bing = q => 'https://www.bing.com/news/search?q=' + encodeURIComponent(q) + '&format=rss&count=50';\n\nconst out = [];\nfor (const c of cfg.competitors) {\n  out.push({ json: { sourceType: 'google_news', competitorId: c.id, label: `Google News · ${c.name}`, url: gnews(c.query) } });\n  out.push({ json: { sourceType: 'bing_news', competitorId: c.id, label: `Bing News · ${c.name}`, url: bing(c.query) } });\n  for (const f of (c.extraFeeds || [])) {\n    out.push({ json: { sourceType: 'company_feed', competitorId: c.id, label: `${f.name}`, url: f.url } });\n  }\n}\nout.push({ json: { sourceType: 'google_news', competitorId: null, label: 'Google News · Market', url: gnews(cfg.marketQuery) } });\nfor (const f of cfg.industryFeeds) {\n  out.push({ json: { sourceType: 'industry_feed', competitorId: null, label: f.name, url: f.url } });\n}\nreturn out;\n"
+      },
+      "id": "b0fcf67a-23a8-4784-b480-172c68640ce4",
+      "name": "Build Source Requests",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        460,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+            },
+            {
+              "name": "Accept",
+              "value": "application/rss+xml, application/xml, text/xml, */*"
+            }
+          ]
+        },
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 3,
+              "batchInterval": 1200
+            }
+          },
+          "response": {
+            "response": {
+              "responseFormat": "text",
+              "outputPropertyName": "body"
+            }
+          },
+          "timeout": 20000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": true,
+              "maxRedirects": 5
+            }
+          }
+        }
+      },
+      "id": "ff6567e1-2e46-4f9e-8980-d27962c550d6",
+      "name": "Fetch Feeds",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        680,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse RSS 2.0 / Atom XML returned by \"Fetch Feeds\" into normalized article items.\n// No external libraries: robust regex parsing of <item>/<entry> blocks.\nconst cfg = $('Config').first().json;\nconst inputs = $input.all();\n\nfunction pair(node, i) {\n  try { const p = $(node).itemMatching(i); if (p && p.json) return p.json; } catch (e) {}\n  const all = $(node).all();\n  return (all[i] && all[i].json) || {};\n}\nconst ENT = { amp: '&', lt: '<', gt: '>', quot: '\"', apos: \"'\", nbsp: ' ', hellip: '…', mdash: '—',\n  ndash: '–', rsquo: '’', lsquo: '‘', rdquo: '”', ldquo: '“', trade: '™', reg: '®', copy: '©' };\nconst decode = (s = '') => s\n  .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))\n  .replace(/&#(\\d+);/g, (_, n) => String.fromCodePoint(parseInt(n, 10)))\n  .replace(/&([a-z]+);/gi, (m, n) => (ENT[n.toLowerCase()] !== undefined ? ENT[n.toLowerCase()] : m));\nconst cdata = (s = '') => s.replace(/<!\\[CDATA\\[([\\s\\S]*?)\\]\\]>/g, '$1');\nconst clean = (s = '') => decode(decode(cdata(s)).replace(/<[^>]+>/g, ' ')).replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim();\nfunction getTag(block, name) {\n  const re = new RegExp('<' + name + '(?:\\\\s[^>]*)?>([\\\\s\\\\S]*?)</' + name + '>', 'i');\n  const m = block.match(re);\n  return m ? cdata(m[1]).trim() : '';\n}\nfunction getAttr(block, name, attr) {\n  const re = new RegExp('<' + name + '\\\\s[^>]*?' + attr + '=\"([^\"]*)\"', 'i');\n  const m = block.match(re);\n  return m ? decode(m[1]) : '';\n}\n// Sandbox-safe URL helpers (n8n's Code sandbox may not provide the URL class)\nfunction parseUrl(u) {\n  const m = String(u || '').trim().match(/^([a-z][a-z0-9+.-]*):\\/\\/([^\\/?#]*)([^?#]*)(\\?[^#]*)?/i);\n  if (!m) return null;\n  const host = m[2].replace(/^[^@]*@/, '').replace(/:\\d+$/, '').toLowerCase();\n  return { host, domain: host.replace(/^www\\./, ''), path: m[3] || '/', search: m[4] || '' };\n}\nfunction queryParam(search, key) {\n  const m = String(search || '').match(new RegExp('[?&]' + key + '=([^&#]*)', 'i'));\n  if (!m) return null;\n  try { return decodeURIComponent(m[1].replace(/\\+/g, ' ')); } catch (e) { return m[1]; }\n}\nfunction resolveUrl(link) {\n  const u = parseUrl(link);\n  if (u && /(^|\\.)bing\\.com$/.test(u.host)) { const real = queryParam(u.search, 'url'); if (real && /^https?:\\/\\//i.test(real)) return real; }\n  return link;\n}\nfunction domainOf(url) { const u = parseUrl(url); return u ? u.domain : ''; }\n\nconst out = [];\nfor (let i = 0; i < inputs.length; i++) {\n  const src = pair('Build Source Requests', i);\n  const body = inputs[i].json.body;\n  if (typeof body !== 'string' || !body.length) continue;           // fetch failed — reported in QC\n  const blocks = body.match(/<item[\\s>][\\s\\S]*?<\\/item>/gi) || body.match(/<entry[\\s>][\\s\\S]*?<\\/entry>/gi) || [];\n  for (const b of blocks) {\n    let title = clean(getTag(b, 'title'));\n    if (!title) continue;\n    const rawLink = decode(getTag(b, 'link')) || getAttr(b, 'link', 'href');\n    const url = resolveUrl(rawLink.trim());\n    const publisher = clean(getTag(b, 'source')) || clean(getTag(b, 'News:Source')) || src.label || '';\n    const publisherUrl = getAttr(b, 'source', 'url');\n    if (publisher && title.endsWith(' - ' + publisher)) title = title.slice(0, -(publisher.length + 3)).trim();\n    let snippet = clean(getTag(b, 'description') || getTag(b, 'summary') || getTag(b, 'content:encoded'));\n    // Google News descriptions just repeat \"title publisher\" — drop that echo\n    if (snippet.startsWith(title)) snippet = snippet.slice(title.length).trim();\n    if (publisher && snippet === publisher) snippet = '';\n    const pub = getTag(b, 'pubDate') || getTag(b, 'published') || getTag(b, 'updated') || getTag(b, 'dc:date');\n    const ts = Date.parse(pub);\n    out.push({ json: {\n      sourceType: src.sourceType, sourceLabel: src.label, feedCompetitorId: src.competitorId || null,\n      title, snippet: snippet.slice(0, 600), url,\n      publisher, publisherDomain: domainOf(publisherUrl) || domainOf(url),\n      publishedAt: isNaN(ts) ? null : new Date(ts).toISOString(), ts: isNaN(ts) ? null : ts,\n    } });\n  }\n}\nreturn out;\n"
+      },
+      "id": "49ea4917-10d2-4a49-8cff-c6a9cf5090b7",
+      "name": "Parse & Normalize Feeds",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        900,
+        300
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Tavily search queries: (a) news search per competitor, (b) competitor's own\n// newsroom/website restricted via include_domains, (c) one market-wide query.\nconst cfg = $('Config').first().json;\nconst T = cfg.settings.tavily;\nif (!T || !T.enabled) return [{ json: { skip: true } }];\nconst tr = cfg.settings.lookbackDays <= 1 ? 'day' : cfg.settings.lookbackDays <= 7 ? 'week' : 'month';\nconst out = [];\nfor (const c of cfg.competitors) {\n  out.push({ json: { competitorId: c.id, label: `Tavily news · ${c.name}`, body: {\n    query: `${c.name} cellular IoT news`, topic: 'news', days: cfg.settings.lookbackDays,\n    max_results: T.maxResultsPerQuery, search_depth: 'basic' } } });\n  if ((c.officialDomains || []).length) out.push({ json: { competitorId: c.id, label: `Tavily newsroom · ${c.name}`, body: {\n    query: `${c.name} announces new product partnership`, topic: 'general', time_range: tr,\n    include_domains: c.officialDomains, max_results: T.maxResultsPerQuery, search_depth: 'basic' } } });\n}\nout.push({ json: { competitorId: null, label: 'Tavily news · Market', body: {\n  query: 'cellular IoT module RedCap NB-IoT LTE-M eSIM news', topic: 'news', days: cfg.settings.lookbackDays,\n  max_results: T.maxResultsPerQuery, search_depth: 'basic' } } });\nreturn out;\n"
+      },
+      "id": "184c4be7-0bac-479e-924d-d29011ad0546",
+      "name": "Build Tavily Queries",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1120,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "1b4be103-ca6c-4f17-98e6-5b39fed711a6",
+              "leftValue": "={{ $json.skip !== true }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f59365a9-06e0-408b-a67d-cc6fbca3abcf",
+      "name": "Tavily Enabled?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1340,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.tavily.com/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 2,
+              "batchInterval": 1000
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "b3555f8c-10f4-4945-a58e-a1d246c6fd1f",
+      "name": "Tavily Search",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1560,
+        180
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Combine RSS articles with Tavily search results into one normalized list.\nconst rss = $('Parse & Normalize Feeds').all().map(i => i.json).filter(x => x && x.title);\nconst inputs = $input.all();\nfunction pair(node, i) {\n  try { const p = $(node).itemMatching(i); if (p && p.json) return p.json; } catch (e) {}\n  const all = $(node).all(); return (all[i] && all[i].json) || {};\n}\n// Sandbox-safe URL helpers (n8n's Code sandbox may not provide the URL class)\nfunction parseUrl(u) {\n  const m = String(u || '').trim().match(/^([a-z][a-z0-9+.-]*):\\/\\/([^\\/?#]*)([^?#]*)(\\?[^#]*)?/i);\n  if (!m) return null;\n  const host = m[2].replace(/^[^@]*@/, '').replace(/:\\d+$/, '').toLowerCase();\n  return { host, domain: host.replace(/^www\\./, ''), path: m[3] || '/', search: m[4] || '' };\n}\nfunction queryParam(search, key) {\n  const m = String(search || '').match(new RegExp('[?&]' + key + '=([^&#]*)', 'i'));\n  if (!m) return null;\n  try { return decodeURIComponent(m[1].replace(/\\+/g, ' ')); } catch (e) { return m[1]; }\n}\nconst domainOf = u => { const p = parseUrl(u); return p ? p.domain : ''; };\nconst tav = [];\nfor (let i = 0; i < inputs.length; i++) {\n  const r = inputs[i].json || {};\n  if (!Array.isArray(r.results)) continue;               // skipped or failed — reported in QC\n  const q = pair('Build Tavily Queries', i);\n  for (const x of r.results) {\n    if (!x.url || !x.title) continue;\n    const ts = Date.parse(x.published_date || '');\n    const dom = domainOf(x.url);\n    tav.push({ sourceType: 'tavily', sourceLabel: q.label || 'Tavily', feedCompetitorId: q.competitorId || null,\n      title: String(x.title).replace(/\\s+/g, ' ').trim(), snippet: String(x.content || '').replace(/\\s+/g, ' ').trim().slice(0, 600),\n      url: x.url, publisher: dom, publisherDomain: dom,\n      publishedAt: isNaN(ts) ? null : new Date(ts).toISOString(), ts: isNaN(ts) ? null : ts });\n  }\n}\nreturn [...rss, ...tav].map(j => ({ json: j }));\n"
+      },
+      "id": "8f8c6995-1447-42e7-b398-fc1c2cc734ba",
+      "name": "Combine Sources",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        300
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Deterministic quality gate BEFORE any AI is spent:\n// 1) relevance gating by alias match  2) noise/spam filter  3) recency\n// 4) near-duplicate clustering across sources  5) per-competitor caps  6) stable IDs\nconst cfg = $('Config').first().json;\nconst S = cfg.settings;\nconst raw = $input.all().map(i => i.json).filter(x => x && x.title);\nconst stats = { nodeVersion: '1.15', collected: raw.length, droppedOffTopic: 0, droppedNoise: 0, droppedNonNews: 0, droppedLanguage: 0, droppedStale: 0, mergedDuplicates: 0, droppedOverCap: 0 };\n\nconst esc = s => s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\nconst compRes = cfg.competitors.map(c => ({ id: c.id, re: new RegExp('(^|[^a-z0-9])(' + c.aliases.map(esc).join('|') + ')(?![a-z0-9])', 'i') }));\nconst marketRe = new RegExp('(^|[^a-z0-9])(' + cfg.marketKeywords.map(esc).join('|') + ')(?![a-z0-9])', 'i');\nconst noiseRes = cfg.noisePatterns.map(p => new RegExp(p, 'i'));\nconst junkUrlRes = (cfg.junkUrlPatterns || []).map(p => new RegExp(p, 'i'));\nconst junkTitleRes = (cfg.junkTitlePatterns || []).map(p => new RegExp(p, 'i'));\nconst ctxRe = new RegExp(cfg.marketContext || '.', 'i');\nconst latinShare = t => { const letters = t.match(/\\p{L}/gu) || []; return letters.length ? (t.match(/[A-Za-z]/g) || []).length / letters.length : 1; };\nconst cutoff = Date.now() - S.lookbackDays * 86400000;\nconst STOP = new Set(['the','and','for','with','from','its','new','into','over','that','this','will','has','have','are','was','iot','announces','announced','launches','launched','unveils','introduces','says','after','amid','about','more','than','how','why','what','inc','ltd','co']);\n\nfunction tokens(s) {\n  return new Set(s.toLowerCase().replace(/[^a-z0-9.\\- ]+/g, ' ').split(/\\s+/).filter(t => t.length > 2 && !STOP.has(t)));\n}\nfunction jaccard(a, b) {\n  if (!a.size || !b.size) return 0;\n  let inter = 0; for (const t of a) if (b.has(t)) inter++;\n  return inter / (a.size + b.size - inter);\n}\n// Sandbox-safe URL helpers (n8n's Code sandbox may not provide the URL class)\nfunction parseUrl(u) {\n  const m = String(u || '').trim().match(/^([a-z][a-z0-9+.-]*):\\/\\/([^\\/?#]*)([^?#]*)(\\?[^#]*)?/i);\n  if (!m) return null;\n  const host = m[2].replace(/^[^@]*@/, '').replace(/:\\d+$/, '').toLowerCase();\n  return { host, domain: host.replace(/^www\\./, ''), path: m[3] || '/', search: m[4] || '' };\n}\nfunction queryParam(search, key) {\n  const m = String(search || '').match(new RegExp('[?&]' + key + '=([^&#]*)', 'i'));\n  if (!m) return null;\n  try { return decodeURIComponent(m[1].replace(/\\+/g, ' ')); } catch (e) { return m[1]; }\n}\nfunction canonical(url) {\n  const u = parseUrl(url);\n  if (!u) return String(url || '').toLowerCase();\n  const q = u.search.replace(/^\\?/, '').split('&').filter(kv => kv && !/^(utm_|ocid|cmpid|fbclid|gclid|mc_|ref)/i.test(kv)).join('&');\n  return (u.domain + u.path.replace(/\\/$/, '') + (q ? '?' + q : '')).toLowerCase();\n}\n\nconst kept = [];\nfor (const a of raw) {\n  const text = a.title + ' ' + a.snippet;\n  const rules = S.filterMode === 'rules';\n  // Not an article: section/listing/index pages (mechanical check, all modes)\n  { const u = parseUrl(a.url) || { path: '', search: '' }; if (/(\\/list\\.html?|\\/(news|newsroom|newscenter|press|blog|media|events)\\/?)$/i.test(u.path) || /\\/(aussteller|exhibitors?|exhibitor-list|company-profile)\\//i.test(u.path) || /[?&]page=\\d/.test(u.search)) { stats.droppedNonNews = (stats.droppedNonNews || 0) + 1; continue; } }\n  if (rules && noiseRes.some(r => r.test(text))) { stats.droppedNoise++; continue; }\n  if (rules && (junkUrlRes.some(r => r.test(a.url || '')) || junkTitleRes.some(r => r.test(a.title)))) { stats.droppedNonNews++; continue; }\n  if (rules && S.englishOnly && latinShare(a.title) < 0.6) { stats.droppedLanguage++; continue; }\n  // Undated pages from company-website searches can be years old -> drop. Tavily news / RSS are date-bounded at source.\n  if (!a.ts && a.sourceType === 'tavily' && !/^Tavily news ·/.test(a.sourceLabel || '')) { stats.droppedStale++; continue; }\n  if (a.ts && a.ts < cutoff) { stats.droppedStale++; continue; }\n  const mentions = compRes.filter(c => c.re.test(text)).map(c => c.id);\n  let competitorId = null;\n  if (a.feedCompetitorId) {\n    const comp = cfg.competitors.find(c => c.id === a.feedCompetitorId) || {};\n    const official = (comp.officialDomains || []).some(d => (a.publisherDomain || '').endsWith(d));\n    if (rules && !mentions.includes(a.feedCompetitorId) && !official) { stats.droppedOffTopic++; continue; }\n    competitorId = a.feedCompetitorId;\n  } else if (mentions.length) {\n    competitorId = mentions[0];\n  } else if (rules && (!marketRe.test(text) || !ctxRe.test(text))) { stats.droppedOffTopic++; continue; }\n  const preferred = [...cfg.preferredDomains, ...cfg.competitors.flatMap(c => c.officialDomains || [])].some(d => (a.publisherDomain || '').endsWith(d));\n  kept.push({ ...a, competitorId, mentions, preferred, canon: canonical(a.url), tok: tokens(a.title) });\n}\n\n// Representative copy first: authoritative domain > has real snippet > earliest\nconst SOCIAL_D = /(^|\\.)(linkedin|facebook|x|twitter|instagram|youtube|tiktok)\\.com$/i;\nfor (const k of kept) k.nonSocial = SOCIAL_D.test(k.publisherDomain || '') ? 0 : 1;\nkept.sort((x, y) => (y.nonSocial - x.nonSocial) || (y.preferred - x.preferred) || ((y.snippet.length > 80) - (x.snippet.length > 80)) || ((x.ts || 0) - (y.ts || 0)));\n\nconst clusters = [];\nfor (const a of kept) {\n  const hit = clusters.find(c => c.competitorId === a.competitorId &&\n    (c.canon === a.canon || jaccard(c.tok, a.tok) >= 0.55));\n  if (hit) {\n    stats.mergedDuplicates++;\n    const newPublisher = a.canon !== hit.canon && (a.publisherDomain || a.publisher) !== (hit.publisherDomain || hit.publisher) &&\n      !hit.alsoReportedBy.some(r => r.publisher === a.publisher);\n    if (newPublisher) { hit.sourceCount++; hit.alsoReportedBy.push({ publisher: a.publisher, url: a.url }); }\n    if (!hit.snippet && a.snippet) hit.snippet = a.snippet;\n    for (const t of a.tok) hit.tok.add(t);\n  } else {\n    clusters.push({ ...a, sourceCount: 1, alsoReportedBy: [] });\n  }\n}\n\n// Caps per competitor (cost control), most-corroborated & newest first\nconst groups = {};\nfor (const c of clusters) (groups[c.competitorId || 'MKT'] ||= []).push(c);\nconst out = [];\nfor (const [gid, list] of Object.entries(groups)) {\n  list.sort((x, y) => (y.sourceCount - x.sourceCount) || ((y.ts || 0) - (x.ts || 0)));\n  const cap = gid === 'MKT' ? S.maxMarketItems : S.maxItemsPerCompetitor;\n  stats.droppedOverCap += Math.max(0, list.length - cap);\n  list.slice(0, cap).forEach((c, idx) => {\n    const fp = [...tokens(c.title)].sort().slice(0, 10).join('-');\n    const { tok, canon, ...rest } = c;\n    out.push({ json: { ...rest, id: `${gid}-${idx + 1}`, dedupeKey: `${gid}|${fp}`, competitorName:\n      (cfg.competitors.find(x => x.id === c.competitorId) || {}).name || 'Market', pipelineStats: stats } });\n  });\n}\nstats.afterFilterDedupe = out.length;\nreturn out;\n"
+      },
+      "id": "89fe14b8-81b2-4bbf-905c-4d017f92a454",
+      "name": "Filter & Dedupe",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        300
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Cross-run memory: skip stories already reported in previous runs.\n// Uses workflow static data -> persists for ACTIVE (scheduled) executions;\n// manual test runs do not save it, so demos always show a full report.\n// Keys are only committed after a successful report (see \"Render Report\").\nconst cfg = $('Config').first().json;\nconst items = $input.all().map(i => i.json).filter(x => x && x.id);\nconst store = $getWorkflowStaticData('global');\nif (cfg.settings.resetHistory) store.seenStories = {};\nconst mode = (typeof $execution !== 'undefined' && $execution.mode) || 'production';\n// Memory applies ONLY to the weekly schedule. Manual and form runs always return a full report.\nconst applyHistory = cfg.settings.useRunHistory && cfg.runSource === 'schedule' && mode !== 'test' && mode !== 'manual';\nconst seen = applyHistory ? (store.seenStories || {}) : {};\nlet skipped = 0;\nconst out = [];\nfor (const it of items) {\n  if (applyHistory && seen[it.dedupeKey]) { skipped++; continue; }\n  out.push({ json: { ...it, pipelineStats: { ...it.pipelineStats, skippedSeenInPreviousRuns: skipped } } });\n}\n// stamp final skipped count on every item\nfor (const o of out) o.json.pipelineStats.skippedSeenInPreviousRuns = skipped;\nreturn out;\n"
+      },
+      "id": "f2607eed-464a-4859-a9f9-f052ecc89568",
+      "name": "Cross-Run Dedupe",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2220,
+        300
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pack items into LLM triage batches with compact, id-tagged prompts.\nconst cfg = $('Config').first().json;\nconst items = $input.all().map(i => i.json).filter(x => x && x.id);\nconst size = cfg.settings.triageBatchSize;\n\nconst ref = cfg.competitors.map(c => `- ${c.id} = ${c.name} (aliases: ${c.aliases.join(', ')}). ${c.focus}`).join('\\n');\nconst batches = [];\nfor (let i = 0; i < Math.max(items.length, 1); i += size) batches.push(items.slice(i, i + size));\n\nreturn batches.map((b, bi) => {\n  const lines = b.map(it => JSON.stringify({\n    id: it.id, competitor_hint: it.competitorName, title: it.title, snippet: it.snippet.slice(0, 450),\n    publisher: it.publisher, date: (it.publishedAt || '').slice(0, 10), corroborating_sources: it.sourceCount,\n  }));\n  const userPrompt = `Competitor reference:\\n${ref}\\n\\nItems to evaluate (${b.length}):\\n` +\n    (lines.length ? lines.join('\\n') : '(no new items this period — return {\"items\":[]})');\n  return { json: { batchIndex: bi, items: b, userPrompt, empty: b.length === 0 } };\n});\n"
+      },
+      "id": "97b47ea2-c226-47d9-b585-14aefe34a796",
+      "name": "Build Triage Batches",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2440,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.settings.llm.baseUrl }}/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify(Object.assign({ model: $('Config').first().json.settings.llm.triageModel, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: $('Config').first().json.prompts.triageSystem }, { role: 'user', content: $json.userPrompt } ] }, typeof $('Config').first().json.settings.llm.temperature === 'number' ? { temperature: $('Config').first().json.settings.llm.temperature } : {})) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1500
+            }
+          },
+          "timeout": 180000
+        }
+      },
+      "id": "8d5df091-11e6-4568-8bb4-40080fe0774a",
+      "name": "AI Triage (LLM)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2660,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse + validate AI triage output. Quality controls:\n//  - strict JSON parse (fence-stripping), enum/range validation\n//  - evidence check: the quoted phrase must actually appear in the source text\n//  - LLM-flagged duplicates merged; missing/failed items fall back to rules\nconst cfg = $('Config').first().json;\nconst S = cfg.settings;\nconst CATS = ['product_launch','partnership','technology','corporate','marketing_positioning','financial','market_signal','other'];\nconst responses = $input.all();\nfunction pair(node, i) {\n  try { const p = $(node).itemMatching(i); if (p && p.json) return p.json; } catch (e) {}\n  const all = $(node).all(); return (all[i] && all[i].json) || {};\n}\nconst strip = s => String(s || '').replace(/^\\s*```(?:json)?/i, '').replace(/```\\s*$/, '').trim();\nconst norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\\s+/g, ' ').trim();\nfunction evidenceOk(quote, hay) {\n  const q = norm(quote), h = norm(hay);\n  if (!q) return false;\n  if (h.includes(q)) return true;\n  const qt = q.split(' ').filter(t => t.length > 2);\n  if (!qt.length) return false;\n  return qt.filter(t => h.includes(t)).length / qt.length >= 0.8;\n}\nfunction heuristic(a) {           // conservative rule-based fallback when the LLM fails\n  const t = (a.title + ' ' + a.snippet).toLowerCase();\n  const rules = [\n    [/\\b(acquires|acquisition|merger|to acquire|takeover)\\b/, 'corporate', 4],\n    [/\\b(partners? with|partnership with|collaborat\\w* with|alliance with|selects|teams up with)\\b/, 'partnership', 3],\n    [/\\b(launch(es|ed)?|unveil(s|ed)?|introduc(es|ed)|debuts?)\\b.*\\b(module|chipset|platform|router|sip|esim|redcap|5g|lte)\\b/, 'product_launch', 3],\n    [/\\b(certif(ied|ication)|redcap|ntn|sgp\\.32|isim)\\b/, 'technology', 2],\n    [/\\b(appoints?|names .* (ceo|chief|president)|restructur\\w*)\\b/, 'corporate', 3],\n    [/\\b(revenue|earnings|guidance|funding)\\b/, 'financial', 2],\n  ];\n  for (const [re, cat, sig] of rules) if (re.test(t)) return { category: cat, significance: sig };\n  return { category: a.competitorId ? 'other' : 'market_signal', significance: 1 };\n}\n\nconst scored = []; const failures = []; let evidenceMismatch = 0, missingFromAI = 0, llmDuplicates = 0, notRelevant = 0;\nfor (let i = 0; i < responses.length; i++) {\n  const batch = pair('Build Triage Batches', i);\n  const r = responses[i].json || {};\n  let parsed = null;\n  if (!batch.empty) {\n    try { parsed = JSON.parse(strip(r.choices[0].message.content)); if (!Array.isArray(parsed.items)) throw new Error('missing items[]'); }\n    catch (e) { failures.push({ stage: 'triage', batch: batch.batchIndex, error: (r.error && (r.error.message || JSON.stringify(r.error))) || e.message }); }\n  }\n  const byId = new Map(((parsed && parsed.items) || []).map(x => [String(x.id), x]));\n  for (const a of (batch.items || [])) {\n    const t = byId.get(a.id);\n    if (!t) {\n      missingFromAI++;\n      const h = heuristic(a);\n      if (S.filterMode !== 'rules') h.significance = Math.min(h.significance, 2);   // no AI + no rules -> appendix only\n      scored.push({ ...a, triage: 'rules_fallback', relevant: true, ...h, rationale: 'Unverified — scored by keyword rules because the AI step failed.',\n        summary: a.title, implication: 'Unverified (AI triage unavailable) — check the source.', confidence: 'low', evidenceOk: false, duplicateOf: null });\n      continue;\n    }\n    let sig = Math.round(Number(t.significance)); if (!(sig >= 1 && sig <= 5)) sig = 2;\n    const ev = evidenceOk(t.evidence_quote, a.title + ' ' + a.snippet);\n    if (!ev) evidenceMismatch++;\n    const conf = ['high', 'medium', 'low'].includes(t.confidence) ? t.confidence : 'low';\n    scored.push({ ...a, triage: 'ai', relevant: t.relevant !== false,\n      category: CATS.includes(t.category) ? t.category : 'other', significance: sig, aiCompetitor: t.competitor,\n      rationale: String(t.significance_rationale || '').slice(0, 300), summary: String(t.summary || a.title).slice(0, 400),\n      implication: String(t.implication_for_us || '').slice(0, 300),\n      confidence: ev ? conf : 'low', evidenceOk: ev, evidenceQuote: String(t.evidence_quote || '').slice(0, 200),\n      duplicateOf: t.duplicate_of && t.duplicate_of !== a.id ? String(t.duplicate_of) : null });\n  }\n}\n// 1) Re-assign items to the company the AI says they are actually about\nconst findComp = name => { const n = String(name || '').toLowerCase().trim(); if (!n || n === 'null') return null;\n  return cfg.competitors.find(c => [c.name, ...c.aliases].some(a => n.includes(a.toLowerCase()) || a.toLowerCase().includes(n))) || null; };\nconst selfRe = new RegExp('\\\\b(' + (cfg.settings.selfNames || ['Cavli']).join('|') + ')\\\\b', 'i');\nlet reassigned = 0;\nfor (const sc of scored) {\n  if (selfRe.test(sc.title) || String(sc.aiCompetitor || '').toUpperCase() === 'SELF') { sc.isSelf = true; sc.competitorId = 'SELF'; sc.competitorName = 'Cavli'; continue; }\n  if (sc.triage !== 'ai') continue;\n  const c = findComp(sc.aiCompetitor);\n  const newId = c ? c.id : null;\n  if (newId !== sc.competitorId) { reassigned++; sc.competitorId = newId; sc.competitorName = c ? c.name : 'Market'; }\n}\n// 2) Social posts are weak evidence unless corroborated\nconst SOCIAL = /(^|\\.)(linkedin|facebook|x|twitter|instagram|youtube|tiktok)\\.com$/i;\n// representative is social only when no non-social copy of the story exists (see Filter & Dedupe)\nfor (const sc of scored) if (SOCIAL.test(sc.publisherDomain || '') && sc.significance > 2) { sc.significance = 2; sc.socialCapped = true; }\n// incidental mention: competitor not named in the headline of a third-party article -> not news about them\nfor (const sc of scored) {\n  const c = cfg.competitors.find(x => x.id === sc.competitorId);\n  if (!c || sc.significance <= 2) continue;\n  const official = (c.officialDomains || []).some(d => (sc.publisherDomain || '').endsWith(d));\n  const inTitle = c.aliases.some(al => new RegExp('(^|[^a-z0-9])' + al.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '(?![a-z0-9])', 'i').test(sc.title));\n  // Exception: roundup/digest articles. If the AI rates it 4+ AND its verified evidence quote names the\n  // competitor, the substantive claim is about them (e.g. \"New US manufacturers…: Telit opens Bristol facility\").\n  const reAl = al => new RegExp('(^|[^a-z0-9])' + al.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '(?![a-z0-9])', 'i');\n  const quoteNames = sc.evidenceOk && c.aliases.some(al => reAl(al).test(sc.evidenceQuote || ''));\n  if (!official && !inTitle && !(sc.significance >= 4 && quoteNames)) { sc.significance = 2; sc.guardrailCapped = true; sc.incidental = true; }\n}\n// per-competitor off-topic guardrail (e.g. Nordic Bluetooth, Semtech LoRa) unless clearly cellular\nfor (const sc of scored) {\n  const c = cfg.competitors.find(x => x.id === sc.competitorId);\n  if (!c || !c.offTopic) continue;\n  const t = sc.title + ' ' + sc.snippet;\n  if (new RegExp(c.offTopic, 'i').test(t) && !new RegExp(c.onTopic || '$^', 'i').test(t) && sc.significance > 2) { sc.significance = 2; sc.guardrailCapped = true; }\n}\n\n// Old content republished/re-indexed: text mentions only past years, never the current one\nconst curYear = new Date(cfg.runDate).getUTCFullYear();\nfor (const sc of scored) {\n  const yrs = ((sc.title + ' ' + sc.snippet).match(/\\b(19|20)\\d{2}\\b/g) || []).map(Number).filter(y => y >= 1990 && y <= curYear + 1);\n  if (yrs.length && Math.max(...yrs) < curYear && sc.significance > 2) { sc.significance = 2; sc.guardrailCapped = true; sc.datedContent = true; }\n}\n// Deterministic guardrails on top of AI judgement\nfor (const sc of scored) if (/\\b(teardown|tear-down|market size|CAGR)\\b|\\bmarket\\b[^.]{0,60}\\b(reach|exceed|surpass|hit|cross|top)(es|ed|ing)?\\s+(US)?\\$/i.test(sc.title + ' ' + sc.snippet) && sc.significance > 2) { sc.significance = 2; sc.guardrailCapped = true; }\n\n// Merge AI-identified duplicates into their primary item\nconst idx = new Map(scored.map(s => [s.id, s]));\nfor (const s of scored) {\n  if (s.duplicateOf && idx.has(s.duplicateOf)) {\n    const p = idx.get(s.duplicateOf);\n    p.sourceCount += s.sourceCount; p.alsoReportedBy.push({ publisher: s.publisher, url: s.url });\n    s.relevant = false; s.mergedInto = p.id; llmDuplicates++;\n  }\n}\n// Unverifiable evidence -> downgrade one level (keeps it visible, avoids overstating)\nfor (const s of scored) if (s.triage === 'ai' && !s.evidenceOk && s.significance > 1) { s.significance -= 1; s.downgraded = true; }\nfor (const s of scored) if (!s.relevant && !s.mergedInto) notRelevant++;\n\nconst selfMentions = scored.filter(s => s.isSelf && s.relevant !== false);\nconst kept = scored.filter(s => !s.isSelf && s.relevant && s.significance >= S.significanceThreshold)\n  .sort((a, b) => (b.significance - a.significance) || (b.sourceCount - a.sourceCount));\n\nconst writerInput = kept.map(k => ({ id: k.id, competitor: k.competitorName, category: k.category, significance: k.significance,\n  summary: k.summary, implication: k.implication, publisher: k.publisher, date: (k.publishedAt || '').slice(0, 10),\n  corroborating_sources: k.sourceCount, confidence: k.confidence }));\nconst writerUserPrompt = `Reporting period: ${cfg.periodStart.slice(0, 10)} to ${cfg.runDate.slice(0, 10)}\\n` +\n  `Tracked competitors (include all): ${cfg.competitors.map(c => c.name).join('; ')}\\n` +\n  `Significance threshold: ${S.significanceThreshold}\\n\\nDevelopments (JSON):\\n${JSON.stringify(writerInput, null, 1)}`;\n\nconst first = (responses.length && pair('Build Triage Batches', 0).items || [])[0];\nreturn [{ json: {\n  scored, kept, selfMentions, writerUserPrompt, failures,\n  triageStats: { nodeVersion: '1.15', scored: scored.length, kept: kept.length, reassigned, socialCapped: scored.filter(s => s.socialCapped).length, notRelevant, llmDuplicates, evidenceMismatch, missingFromAI,\n    batches: responses.length, batchFailures: failures.length },\n  pipelineStats: (first && first.pipelineStats) || null,\n} }];\n"
+      },
+      "id": "9c6f5ee3-3ce0-48ce-a208-b76c2827b70c",
+      "name": "Score & Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2880,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Pick high-significance items whose URL is a direct article link and request full text.\nconst cfg = $('Config').first().json;\nconst T = cfg.settings.tavily || {};\nconst base = $('Score & Validate').first().json;\nconst urls = [];\nif (T.enabled) {\n  for (const k of base.kept) {\n    if (k.significance < T.enrichMinSignificance) continue;\n    const cands = [k.url, ...(k.alsoReportedBy || []).map(a => a.url)].filter(u => u && !/news\\.google\\.com/.test(u));\n    if (cands.length) urls.push({ id: k.id, url: cands[0] });\n    if (urls.length >= T.maxEnrich) break;\n  }\n}\nreturn [{ json: { enrichTargets: urls, body: { urls: urls.map(u => u.url), extract_depth: 'basic' }, doEnrich: urls.length > 0 } }];\n"
+      },
+      "id": "a0b969c5-aafe-44e7-affd-1a62dce67b39",
+      "name": "Build Extract Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3100,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "c2a790a2-97f5-4604-81b9-fcbfaa448eb2",
+              "leftValue": "={{ $json.doEnrich }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "dbcd7c2c-fa55-4f39-8a56-a9d09bd0e237",
+      "name": "Anything to Enrich?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        3320,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.tavily.com/extract",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.body) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1000
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "cc41f868-6288-4db0-853a-f8ace5ad086d",
+      "name": "Tavily Extract",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3540,
+        180
+      ],
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 3000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Attach full-article excerpts to the writer input. Falls back silently if extraction failed.\nconst cfg = $('Config').first().json;\nconst base = $('Score & Validate').first().json;\nconst req = $('Build Extract Request').first().json;\nconst r = $input.first().json || {};\nconst byUrl = new Map();\nfor (const x of (Array.isArray(r.results) ? r.results : [])) if (x.url && x.raw_content) byUrl.set(x.url, x.raw_content);\nconst clean = t => String(t).replace(/!\\[[^\\]]*\\]\\([^)]*\\)/g, '').replace(/\\[([^\\]]*)\\]\\([^)]*\\)/g, '$1')\n  .replace(/[#*_>`|]+/g, ' ').replace(/\\s+/g, ' ').trim();\nconst excerpts = {};\nfor (const t of req.enrichTargets) {\n  const raw = byUrl.get(t.url) || [...byUrl.entries()].find(([u]) => u.replace(/\\/$/, '') === t.url.replace(/\\/$/, ''))?.[1];\n  if (raw) excerpts[t.id] = clean(raw).slice(0, 1800);\n}\nconst writerInput = base.kept.map(k => ({ id: k.id, competitor: k.competitorName, category: k.category, significance: k.significance,\n  summary: k.summary, implication: k.implication, publisher: k.publisher, date: (k.publishedAt || '').slice(0, 10),\n  corroborating_sources: k.sourceCount, confidence: k.confidence, ...(excerpts[k.id] ? { article_excerpt: excerpts[k.id] } : {}) }));\nconst writerUserPrompt = `Reporting period: ${cfg.periodStart.slice(0, 10)} to ${cfg.runDate.slice(0, 10)}\\n` +\n  `Tracked competitors (include all): ${cfg.competitors.map(c => c.name).join('; ')}\\n` +\n  `Significance threshold: ${cfg.settings.significanceThreshold}\\n\\nDevelopments (JSON):\\n${JSON.stringify(writerInput, null, 1)}`;\nreturn [{ json: { writerUserPrompt, enrichment: { requested: req.enrichTargets.length, succeeded: Object.keys(excerpts).length,\n  error: r.error ? (r.error.message || 'extract failed') : null }, enrichedIds: Object.keys(excerpts) } }];\n"
+      },
+      "id": "4d20785d-3ea9-4df4-bd62-205283a6ca94",
+      "name": "Attach Full Text",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3760,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Config').first().json.settings.llm.baseUrl }}/chat/completions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify(Object.assign({ model: $('Config').first().json.settings.llm.writerModel, response_format: { type: 'json_object' }, messages: [ { role: 'system', content: $('Config').first().json.prompts.writerSystem }, { role: 'user', content: $json.writerUserPrompt } ] }, typeof $('Config').first().json.settings.llm.temperature === 'number' ? { temperature: $('Config').first().json.settings.llm.temperature } : {})) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 1500
+            }
+          },
+          "timeout": 180000
+        }
+      },
+      "id": "f659d4c4-b916-4c2d-b974-48b65c9176ff",
+      "name": "AI Report Writer (LLM)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        3980,
+        300
+      ],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// QC & ASSEMBLY — validates the AI-written report against the verified evidence set.\n//  - citation guard: every referenced id must exist in the kept set (blocks hallucinated items)\n//  - coverage guard: every significance>=4 item must appear; missing ones are re-inserted\n//  - completeness: every tracked competitor present\n//  - source health: % of feeds fetched successfully\n//  - fallback: if the writer call fails, a deterministic report is built from verified items\nconst cfg = $('Config').first().json;\nconst base = $('Score & Validate').first().json;\nconst r = $input.first().json || {};\nconst strip = s => String(s || '').replace(/^\\s*```(?:json)?/i, '').replace(/```\\s*$/, '').trim();\nconst keptById = new Map(base.kept.map(k => [k.id, k]));\nconst unknownRefs = new Set(); let reinserted = 0, reinsertedHigh = 0;\nconst ok = id => { if (keptById.has(id)) return true; if (id) unknownRefs.add(id); return false; };\nconst asArr = x => (Array.isArray(x) ? x : []);\n\nlet report = null, writerError = null;\ntry { report = JSON.parse(strip(r.choices[0].message.content)); if (!report || typeof report !== 'object') throw new Error('not an object'); }\ncatch (e) { writerError = (r.error && (r.error.message || JSON.stringify(r.error))) || e.message; }\n\nfunction devFromItem(k) {\n  return { id: k.id, related_ids: [], headline: k.title.slice(0, 110), what_happened: k.summary,\n    why_it_matters: k.implication || k.rationale, category: k.category, significance: k.significance };\n}\nif (!report) {   // deterministic fallback — still a usable report\n  report = { headline: base.kept.length ? `${base.kept.length} notable developments detected (auto-generated summary; AI writer unavailable).` : 'No significant competitor developments detected this period.',\n    executive_summary: base.kept.slice(0, 4).map(k => `${k.competitorName}: ${k.summary} [${k.id}]`),\n    competitors: [], market_signals: base.kept.filter(k => !k.competitorId).slice(0, 5).map(k => ({ text: k.summary, ids: [k.id] })),\n    themes: [], recommended_actions: [], watchlist: [] };\n}\n\n// Normalise competitors + citation guard\nconst compByName = new Map(asArr(report.competitors).map(c => [String(c.name || '').toLowerCase(), c]));\nreport.competitors = cfg.competitors.map(c => {\n  const found = compByName.get(c.name.toLowerCase()) || asArr(report.competitors).find(x => String(x.name || '').toLowerCase().includes(c.name.split(' ')[0].toLowerCase()));\n  const sec = found ? { ...found, name: c.name } : { name: c.name, activity_level: 'none', summary: 'No significant developments detected this period.', developments: [] };\n  sec.developments = asArr(sec.developments).filter(d => ok(d.id)).map(d => ({ ...d, related_ids: asArr(d.related_ids).filter(ok) }));\n  // coverage guard: every verified item above threshold must appear in the report\n  const covered = new Set(sec.developments.flatMap(d => [d.id, ...d.related_ids]));\n  // Lower-significance items the writer chose to omit stay in Appendix A (writer's editorial judgement).\n  for (const k of base.kept.filter(k => k.competitorId === c.id && k.significance >= 4 && !covered.has(k.id))) {\n    sec.developments.push(devFromItem(k)); reinserted++; reinsertedHigh++;\n  }\n  if (sec.developments.length && (!sec.activity_level || sec.activity_level === 'none')) sec.activity_level = 'low';\n  if (!found && sec.developments.length) sec.summary = 'Developments listed below (added by coverage check).';\n  sec.developments.sort((a, b) => (b.significance || 0) - (a.significance || 0));\n  return sec;\n});\n// Same event under two competitors (e.g. a lawsuit): keep it once, under the first/highest-significance section\nconst toks = t => new Set(String(t || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').split(/\\s+/).filter(w => w.length > 3));\nconst jac = (a, b) => { let i = 0; for (const x of a) if (b.has(x)) i++; return a.size && b.size ? i / (a.size + b.size - i) : 0; };\nlet crossDupes = 0; const seenDevs = [];\nfor (const sec of report.competitors) {\n  sec.developments = sec.developments.filter(d => {\n    const t = toks(d.headline + ' ' + d.what_happened);\n    const txt = d.headline + ' ' + d.what_happened;\n    const names = cfg.competitors.filter(c => c.aliases.some(a => new RegExp('\\\\b' + a.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&') + '\\\\b', 'i').test(txt))).map(c => c.name);\n    const dup = seenDevs.find(o => o.sec !== sec.name && (jac(o.t, t) >= 0.4 ||\n      (names.includes(o.sec) && o.names.includes(sec.name) && (o.cat === d.category || jac(o.t, t) >= 0.15))));\n    if (dup) { crossDupes++; if (!/see /i.test(sec.summary || '')) sec.summary = (sec.summary || '') + ` (Shared event covered under ${dup.sec}.)`; return false; }\n    seenDevs.push({ sec: sec.name, t, names, cat: d.category }); return true;\n  });\n  if (!sec.developments.length && sec.activity_level !== 'none') sec.activity_level = 'low';\n}\nconst cleanRefs = text => String(text || '').replace(/\\[([A-Z]{3}-\\d+)(?:\\s*,\\s*[A-Z]{3}-\\d+)*\\]/g, m => {\n  const ids = m.slice(1, -1).split(/\\s*,\\s*/).filter(ok); return ids.length ? `[${ids.join(', ')}]` : '';\n});\nreport.headline = cleanRefs(report.headline);\n// a bullet with no surviving valid citation is an unsupported claim -> dropped\nreport.executive_summary = asArr(report.executive_summary).map(cleanRefs).filter(b => /\\[[A-Z]{3}-\\d+/.test(b));\nreport.market_signals = asArr(report.market_signals).map(m => ({ ...m, text: cleanRefs(m.text), ids: asArr(m.ids).filter(ok) })).filter(m => m.ids.length);\nconst mCovered = new Set(report.market_signals.flatMap(m => m.ids));\nfor (const k of base.kept.filter(k => !k.competitorId && !mCovered.has(k.id))) { report.market_signals.push({ text: k.summary, ids: [k.id] }); reinserted++; }\nreport.themes = asArr(report.themes).map(t => ({ ...t, ids: asArr(t.ids).filter(ok) })).filter(t => t.ids.length);\nreport.recommended_actions = asArr(report.recommended_actions).map(a => ({ ...a, ids: asArr(a.ids).filter(ok) })).filter(a => a.ids.length);\nreport.watchlist = asArr(report.watchlist).map(String);\n\n// Source health\nconst reqs = $('Build Source Requests').all().map(x => x.json);\nconst fetched = $('Fetch Feeds').all();\nconst sourceHealth = reqs.map((q, i) => {\n  const f = (fetched[i] && fetched[i].json) || {};\n  const n = typeof f.body === 'string' ? (f.body.match(/<(item|entry)[\\s>]/gi) || []).length : 0;\n  return { label: q.label, ok: n > 0, items: n, error: n > 0 ? null : (f.error ? (f.error.message || 'request failed') : 'no items returned') };\n});\ntry {\n  const tq = $('Build Tavily Queries').all().map(x => x.json);\n  let tr = []; try { tr = $('Tavily Search').all(); } catch (e) {}\n  tq.forEach((q, i) => { if (q.skip) return; const f = (tr[i] && tr[i].json) || {};\n    const n = Array.isArray(f.results) ? f.results.length : 0;\n    sourceHealth.push({ label: q.label, ok: Array.isArray(f.results), items: n, error: Array.isArray(f.results) ? null : (f.error ? (f.error.message || 'request failed') : 'not run') }); });\n} catch (e) {}\nlet enrichment = { requested: 0, succeeded: 0 };\ntry { enrichment = $('Attach Full Text').first().json.enrichment || enrichment; } catch (e) {}\nconst okSources = sourceHealth.filter(s => s.ok).length;\n\nconst ts = base.triageStats;\nconst checks = [\n  { name: 'Sources reachable (≥60%)', pass: okSources / Math.max(sourceHealth.length, 1) >= 0.6, detail: `${okSources}/${sourceHealth.length}` },\n  { name: 'AI triage batches succeeded', pass: ts.batchFailures === 0, detail: `${ts.batches - ts.batchFailures}/${ts.batches}${base.failures.length ? ' · ' + String(base.failures[0].error).slice(0, 200) : ''}` },\n  { name: 'Evidence quotes verified (≥80%)', pass: ts.scored === 0 || (ts.evidenceMismatch / Math.max(ts.scored - ts.missingFromAI, 1)) <= 0.2, detail: `${ts.scored - ts.missingFromAI - ts.evidenceMismatch}/${ts.scored - ts.missingFromAI}` },\n  { name: 'No hallucinated citations in report', pass: unknownRefs.size === 0, detail: unknownRefs.size ? `removed: ${[...unknownRefs].join(', ')}` : 'none' },\n  { name: 'All high-significance items covered by AI writer', pass: reinsertedHigh === 0, detail: (reinsertedHigh ? `${reinsertedHigh} high-significance item(s) re-inserted` : 'complete') + (crossDupes ? ` · ${crossDupes} cross-competitor duplicate(s) merged` : '') },\n  { name: 'Full-text enrichment (≥50% of targets)', pass: enrichment.requested === 0 || enrichment.succeeded / enrichment.requested >= 0.5, detail: `${enrichment.succeeded}/${enrichment.requested} articles${enrichment.error ? ' · ' + enrichment.error : ''}` },\n  { name: 'AI writer succeeded', pass: !writerError, detail: writerError ? writerError.slice(0, 300) : 'ok' },\n];\nconst qcStatus = checks.every(c => c.pass) ? 'pass' : 'review';\n\nlet pipeline = base.pipelineStats;\nif (!pipeline) {\n  let collected = 0; try { collected = $('Parse & Normalize Feeds').all().filter(x => x.json && x.json.title).length; } catch (e) {}\n  pipeline = { collected, afterFilterDedupe: 0 };\n}\nreturn [{ json: { report, qcStatus, checks, sourceHealth, pipeline, triageStats: ts, failures: base.failures, writerError } }];\n"
+      },
+      "id": "358d8670-de46-46b9-9671-f1975285579a",
+      "name": "QC & Assemble",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Render the report as email-ready HTML + Markdown, attach both as files,\n// and commit processed story keys to cross-run history.\nconst cfg = $('Config').first().json;\nconst base = $('Score & Validate').first().json;\nconst { report, qcStatus, checks, sourceHealth, pipeline, triageStats } = $input.first().json;\nlet enriched = new Set(); try { enriched = new Set($('Attach Full Text').first().json.enrichedIds || []); } catch (e) {}\nconst byId = new Map(base.scored.map(s => [s.id, s]));\nconst esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\"/g, '&quot;');\nconst day = s => (s || '').slice(0, 10);\nconst CAT = { product_launch: 'Product', partnership: 'Partnership', technology: 'Technology', corporate: 'Corporate',\n  marketing_positioning: 'Marketing', financial: 'Financial', market_signal: 'Market', other: 'Other' };\nconst SIGC = { 5: '#b42318', 4: '#c4320a', 3: '#b54708', 2: '#475467', 1: '#667085' };\nconst ACT = { high: '#b42318', medium: '#b54708', low: '#027a48', none: '#667085' };\nconst badge = (t, c) => `<span style=\"display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;color:#fff;background:${c};margin-right:4px\">${esc(t)}</span>`;\nconst link = id => { const s = byId.get(id); return s ? `<a href=\"${esc(s.url)}\" style=\"color:#175cd3;text-decoration:none\">[${esc(id)}]</a>` : `[${esc(id)}]`; };\nconst linkify = t => esc(t).replace(/\\[([A-Z]{3}-\\d+(?:,\\s*[A-Z]{3}-\\d+)*)\\]/g, (m, g) => g.split(/,\\s*/).map(link).join(' '));\nconst extraIds = (text, ids) => (ids || []).filter(id => !String(text || '').includes(id)).map(link).join(' ');\nconst period = `${day(cfg.periodStart)} → ${day(cfg.runDate)}`;\nconst totalDev = report.competitors.reduce((n, c) => n + c.developments.length, 0);\n\nlet h = `<!doctype html><html><head><meta charset=\"utf-8\"><title>${esc(cfg.settings.reportTitle)}</title></head>\n<body style=\"margin:0;background:#f2f4f7;font-family:Segoe UI,Helvetica,Arial,sans-serif;color:#101828\">\n<div style=\"max-width:820px;margin:0 auto;background:#fff\">\n<div style=\"background:#0b1f3a;color:#fff;padding:24px 28px\">\n <div style=\"font-size:12px;letter-spacing:1px;opacity:.75;text-transform:uppercase\">${esc(cfg.settings.cadence)} brief · ${esc(period)} · ${esc(cfg.runId)} · v${esc(cfg.settings.version || '')} (filter v${esc((pipeline && pipeline.nodeVersion) || 'old')}, scoring v${esc(triageStats.nodeVersion || 'old')})</div>\n <div style=\"font-size:24px;font-weight:700;margin-top:6px\">${esc(cfg.settings.reportTitle)}</div>\n <div style=\"font-size:15px;margin-top:10px;line-height:1.5\">${linkify(report.headline)}</div>\n ${qcStatus !== 'pass' ? '<div style=\"margin-top:10px;background:#fef0c7;color:#7a2e0e;padding:8px 12px;border-radius:6px;font-size:13px\"><b>Needs review:</b> one or more quality checks did not pass — see the QC panel at the end.</div>' : ''}\n</div>\n<div style=\"padding:20px 28px\">\n<table style=\"width:100%;border-collapse:collapse;font-size:13px;margin-bottom:8px\"><tr>\n${[['Articles scanned', pipeline.collected], ['Unique stories', pipeline.afterFilterDedupe], ['AI-scored', triageStats.scored], ['In this brief', totalDev]]\n  .map(([k, v]) => `<td style=\"text-align:center;padding:10px;background:#f9fafb;border:1px solid #eaecf0\"><div style=\"font-size:20px;font-weight:700\">${esc(v)}</div><div style=\"color:#667085\">${k}</div></td>`).join('')}\n</tr></table>\n<h2 style=\"font-size:17px;border-bottom:2px solid #0b1f3a;padding-bottom:6px\">Executive summary</h2>\n<ul style=\"line-height:1.6;font-size:14px;padding-left:20px\">${report.executive_summary.map(b => `<li>${linkify(b)}</li>`).join('') || '<li>No significant developments this period.</li>'}</ul>\n<h2 style=\"font-size:17px;border-bottom:2px solid #0b1f3a;padding-bottom:6px\">Competitor activity</h2>\n<table style=\"width:100%;border-collapse:collapse;font-size:13px\">\n<tr style=\"background:#f9fafb\"><th style=\"text-align:left;padding:6px;border:1px solid #eaecf0\">Competitor</th><th style=\"padding:6px;border:1px solid #eaecf0\">Activity</th><th style=\"padding:6px;border:1px solid #eaecf0\">Developments</th><th style=\"padding:6px;border:1px solid #eaecf0\">Top significance</th></tr>\n${report.competitors.map(c => `<tr><td style=\"padding:6px;border:1px solid #eaecf0\">${esc(c.name)}</td><td style=\"text-align:center;padding:6px;border:1px solid #eaecf0\">${badge(c.activity_level || 'none', ACT[c.activity_level] || '#667085')}</td><td style=\"text-align:center;padding:6px;border:1px solid #eaecf0\">${c.developments.length}</td><td style=\"text-align:center;padding:6px;border:1px solid #eaecf0\">${c.developments.length ? Math.max(...c.developments.map(d => d.significance || 0)) + '/5' : '–'}</td></tr>`).join('')}\n</table>`;\n\nfor (const c of report.competitors) {\n  h += `<h3 style=\"font-size:16px;margin:24px 0 4px\">${esc(c.name)} ${badge(c.activity_level || 'none', ACT[c.activity_level] || '#667085')}</h3>\n<p style=\"margin:0 0 10px;color:#475467;font-size:14px\">${linkify(c.summary)}</p>`;\n  for (const d of c.developments) {\n    const s = byId.get(d.id) || {};\n    const srcs = [s, ...(s.alsoReportedBy || [])].filter((x, i, arr) => x && x.url && arr.findIndex(y => y && (y.publisher || '').toLowerCase() === (x.publisher || '').toLowerCase()) === i).slice(0, 4)\n      .map(x => `<a href=\"${esc(x.url)}\" style=\"color:#175cd3\">${esc(x.publisher || 'source')}</a>`).join(' · ');\n    h += `<div style=\"border:1px solid #eaecf0;border-left:4px solid ${SIGC[d.significance] || '#667085'};border-radius:6px;padding:10px 14px;margin:8px 0\">\n <div>${badge('Significance ' + (d.significance || '?') + '/5', SIGC[d.significance] || '#667085')}${badge(CAT[d.category] || d.category || 'Other', '#344054')}${s.confidence === 'low' ? badge('low confidence', '#98a2b3') : ''}${enriched.has(d.id) ? badge('full article read', '#027a48') : ''}<span style=\"font-size:12px;color:#667085\">${esc(day(s.publishedAt))} ${link(d.id)}</span></div>\n <div style=\"font-weight:600;font-size:15px;margin:6px 0 4px\">${esc(d.headline)}</div>\n <div style=\"font-size:14px;line-height:1.5\">${linkify(d.what_happened)}</div>\n <div style=\"font-size:14px;line-height:1.5;margin-top:4px\"><b>Why it matters:</b> ${linkify(d.why_it_matters)}</div>\n <div style=\"font-size:12px;color:#667085;margin-top:6px\">Sources (${s.sourceCount || 1}): ${srcs}</div></div>`;\n  }\n}\nconst selfM = (base.selfMentions || []).filter((m, i, arr) => arr.findIndex(x => String(x.title).toLowerCase().replace(/[^a-z0-9]/g, '') === String(m.title).toLowerCase().replace(/[^a-z0-9]/g, '')) === i);\nif (selfM.length) h += `<h2 style=\"font-size:17px;border-bottom:2px solid #0b1f3a;padding-bottom:6px;margin-top:28px\">Cavli in the news</h2><ul style=\"font-size:14px;line-height:1.6;padding-left:20px\">${selfM.map(m => `<li><a href=\"${esc(m.url)}\" style=\"color:#175cd3\">${esc(m.title)}</a> <span style=\"color:#667085\">— ${esc([m.publisher, day(m.publishedAt)].filter(Boolean).join(', '))}</span></li>`).join('')}</ul>`;\nif (report.market_signals.length) h += `<h2 style=\"font-size:17px;border-bottom:2px solid #0b1f3a;padding-bottom:6px;margin-top:28px\">Market signals</h2><ul style=\"font-size:14px;line-height:1.6;padding-left:20px\">${report.market_signals.map(m => `<li>${linkify(m.text)} ${extraIds(m.text, m.ids)}</li>`).join('')}</ul>`;\nif (report.themes.length) h += `<h2 style=\"font-size:17px;border-bottom:2px solid #0b1f3a;padding-bottom:6px\">Themes</h2>${report.themes.map(t => `<p style=\"font-size:14px;line-height:1.5\"><b>${esc(t.theme)}.</b> ${linkify(t.description)} ${extraIds(t.description, t.ids)}</p>`).join('')}`;\nif (report.recommended_actions.length) h += `<h2 style=\"font-size:17px;border-bottom:2px solid #0b1f3a;padding-bottom:6px\">Recommended actions</h2><table style=\"width:100%;border-collapse:collapse;font-size:13px\">${report.recommended_actions.map(a => `<tr><td style=\"padding:6px;border:1px solid #eaecf0;width:90px\">${badge(a.priority || 'medium', ACT[a.priority] || '#667085')}</td><td style=\"padding:6px;border:1px solid #eaecf0\">${linkify(a.action)} ${extraIds(a.action, a.ids)}</td><td style=\"padding:6px;border:1px solid #eaecf0;width:120px;color:#475467\">${esc(a.owner || '')}</td></tr>`).join('')}</table>`;\nif (report.watchlist.length) h += `<h2 style=\"font-size:17px;border-bottom:2px solid #0b1f3a;padding-bottom:6px\">Watchlist for next period</h2><ul style=\"font-size:14px;line-height:1.6;padding-left:20px\">${report.watchlist.map(w => `<li>${esc(w)}</li>`).join('')}</ul>`;\n\n// Appendix: everything scored (incl. below threshold) — transparency for reviewers\nconst appendix = base.scored.filter(s => !s.mergedInto).sort((a, b) => (b.significance || 0) - (a.significance || 0));\nh += `<h2 style=\"font-size:17px;border-bottom:2px solid #0b1f3a;padding-bottom:6px;margin-top:28px\">Appendix A — all scored items (${appendix.length})</h2>\n<table style=\"width:100%;border-collapse:collapse;font-size:12px\"><tr style=\"background:#f9fafb\">${['ID', 'Competitor', 'Item', 'Cat.', 'Sig.', 'Status'].map(x => `<th style=\"text-align:left;padding:5px;border:1px solid #eaecf0\">${x}</th>`).join('')}</tr>\n${appendix.map(s => `<tr><td style=\"padding:5px;border:1px solid #eaecf0\">${esc(s.id)}</td><td style=\"padding:5px;border:1px solid #eaecf0\">${esc(s.competitorName)}</td><td style=\"padding:5px;border:1px solid #eaecf0\"><a href=\"${esc(s.url)}\" style=\"color:#175cd3\">${esc(s.title.slice(0, 110))}</a><br><span style=\"color:#667085\">${esc(s.publisher)} · ${esc(day(s.publishedAt))}</span></td><td style=\"padding:5px;border:1px solid #eaecf0\">${esc(CAT[s.category] || '')}</td><td style=\"padding:5px;border:1px solid #eaecf0\">${esc(s.significance)}</td><td style=\"padding:5px;border:1px solid #eaecf0\">${!s.relevant ? 'not relevant' : s.significance >= cfg.settings.significanceThreshold ? 'in brief' : 'below threshold'}${s.triage === 'rules_fallback' ? ' (rules)' : ''}${s.socialCapped ? ' (social, capped)' : ''}${s.guardrailCapped ? ' (market-research/teardown, capped)' : ''}${s.isSelf ? ' (own company)' : ''}${s.downgraded ? ' ↓evidence' : ''}</td></tr>`).join('')}</table>`;\n\nh += `<h2 style=\"font-size:17px;border-bottom:2px solid #0b1f3a;padding-bottom:6px;margin-top:28px\">Appendix B — method & quality control</h2>\n<p style=\"font-size:13px;color:#475467;line-height:1.5\">Collected from public news/RSS feeds and Tavily search (news + competitors’ own sites) → rule-based relevance, noise and recency filters → cross-source and cross-run de-duplication → AI triage (category, significance 1–5, evidence quote) → evidence verification → full-article retrieval for high-significance items → AI synthesis with mandatory [ID] citations → automated citation/coverage checks. QC status: <b>${qcStatus.toUpperCase()}</b>. Run started by: <b>${esc(cfg.runSource || 'manual')}</b>${cfg.runSource === 'form' ? ' (custom competitor list: ' + esc(cfg.competitors.map(c => c.name).join(', ')) + ')' : ''}.</p>\n<table style=\"width:100%;border-collapse:collapse;font-size:12px\">${checks.map(c => `<tr><td style=\"padding:5px;border:1px solid #eaecf0;width:24px\">${c.pass ? '✅' : '⚠️'}</td><td style=\"padding:5px;border:1px solid #eaecf0\">${esc(c.name)}</td><td style=\"padding:5px;border:1px solid #eaecf0;color:#475467\">${esc(c.detail)}</td></tr>`).join('')}</table>\n${((base.failures || []).length || $input.first().json.writerError) ? `<p style=\"font-size:12px;color:#b42318\"><b>Errors:</b><br>${[...(base.failures || []).map(f => `Triage batch ${f.batch}: ${esc(String(f.error).slice(0, 300))}`), ...($input.first().json.writerError ? ['Writer: ' + esc(String($input.first().json.writerError).slice(0, 300))] : [])].join('<br>')}</p>` : ''}\n<p style=\"font-size:12px;color:#475467;margin-top:10px\">Pipeline: ${esc(pipeline.collected)} collected · ${esc(pipeline.droppedNoise ?? '–')} noise · ${esc(pipeline.droppedOffTopic ?? '–')} off-topic · ${esc(pipeline.droppedStale ?? '–')} stale · ${esc(pipeline.mergedDuplicates ?? '–')} duplicates merged · ${esc(pipeline.skippedSeenInPreviousRuns ?? 0)} seen in earlier runs · ${esc(triageStats.notRelevant)} judged not relevant by AI · ${esc(triageStats.llmDuplicates)} AI-detected duplicates · ${esc(triageStats.reassigned ?? 0)} re-assigned to the correct company · ${esc(triageStats.socialCapped ?? 0)} social posts capped.</p>\n<p style=\"font-size:12px;color:#475467\">Sources: ${sourceHealth.map(s => `${s.ok ? '●' : '○'} ${esc(s.label)} (${s.ok ? s.items : esc(s.error)})`).join(' &nbsp; ')}</p>\n<p style=\"font-size:11px;color:#98a2b3;margin-top:18px\">Generated automatically from publicly available information. AI-generated summaries — verify against linked sources before external use.</p>\n</div></div></body></html>`;\n\n// Markdown version (for Slack/Notion/Docs)\nlet md = `# ${cfg.settings.reportTitle}\\n_${cfg.runSource === 'form' ? 'On-demand' : cfg.settings.cadence} brief · ${period} · ${cfg.runId} · v${cfg.settings.version || ''} (filter v${(pipeline && pipeline.nodeVersion) || 'old'}, scoring v${triageStats.nodeVersion || 'old'}) · QC: ${qcStatus}_\\n\\n**${report.headline}**\\n\\n## Executive summary\\n` +\n  (report.executive_summary.map(b => `- ${b}`).join('\\n') || '- No significant developments.') + '\\n';\nfor (const c of report.competitors) {\n  md += `\\n## ${c.name} — activity: ${c.activity_level || 'none'}\\n${c.summary}\\n`;\n  for (const d of c.developments) { const s = byId.get(d.id) || {};\n    md += `\\n- **${d.headline}** (sig ${d.significance}/5, ${CAT[d.category] || d.category}) [${d.id}](${s.url || ''})\\n  - ${d.what_happened}\\n  - _Why it matters:_ ${d.why_it_matters}\\n`; }\n}\nif (selfM.length) md += `\\n## Cavli in the news\\n${selfM.map(m => `- [${m.title}](${m.url}) — ${[m.publisher, day(m.publishedAt)].filter(Boolean).join(', ')}`).join('\\n')}\\n`;\nif (report.market_signals.length) md += `\\n## Market signals\\n${report.market_signals.map(m => `- ${m.text}`).join('\\n')}\\n`;\nif (report.recommended_actions.length) md += `\\n## Recommended actions\\n${report.recommended_actions.map(a => `- [${a.priority}] ${a.action} — ${a.owner} (${a.ids.join(', ')})`).join('\\n')}\\n`;\nif (report.watchlist.length) md += `\\n## Watchlist\\n${report.watchlist.map(w => `- ${w}`).join('\\n')}\\n`;\nmd += `\\n---\\n## Quality control: ${qcStatus.toUpperCase()}\\n${checks.map(c => `- ${c.pass ? '✓' : '✗'} ${c.name} — ${c.detail}`).join('\\n')}\\n`;\nconst errList = [...(base.failures || []).map(f => `Triage batch ${f.batch}: ${f.error}`), ...($input.first().json.writerError ? [`Writer: ${$input.first().json.writerError}`] : [])];\nif (errList.length) md += `\\n### Errors\\n${errList.map(e => '- ' + String(e).slice(0, 400)).join('\\n')}\\n`;\n\n// Commit processed stories to cross-run history — scheduled runs only (manual/test runs never change it)\nconst runMode = (typeof $execution !== 'undefined' && $execution.mode) || 'production';\n// Only scheduled runs write to the memory; manual and form runs never change it\nconst store = (runMode === 'test' || runMode === 'manual' || cfg.runSource !== 'schedule') ? {} : $getWorkflowStaticData('global');\nconst seen = store.seenStories || {};\nconst nowMs = Date.now(), ttl = cfg.settings.historyRetentionDays * 86400000;\nfor (const s of base.scored) seen[s.dedupeKey] = nowMs;\nfor (const [k, t] of Object.entries(seen)) if (nowMs - t > ttl) delete seen[k];\nstore.seenStories = seen;\n\nconst fname = `competitor-intel_${day(cfg.runDate)}`;\nconst b64 = s => Buffer.from(s, 'utf8').toString('base64');\nreturn [{\n  json: {\n    qcStatus, subject: `${qcStatus === 'pass' ? '' : '[REVIEW] '}${cfg.settings.reportTitle} · ${period}`,\n    headline: report.headline, html: h, markdown: md, fileName: fname,\n    recipients: cfg.settings.reportRecipients, reviewer: cfg.settings.reviewerEmail,\n    runId: cfg.runId, developments: totalDev, checks,\n  },\n  binary: {\n    report_html: { data: b64(h), mimeType: 'text/html', fileName: fname + '.html', fileExtension: 'html' },\n    report_md: { data: b64(md), mimeType: 'text/markdown', fileName: fname + '.md', fileExtension: 'md' },\n  },\n}];\n"
+      },
+      "id": "f4fb13d7-dcb6-43c5-8979-ad539f0b07aa",
+      "name": "Render Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        4420,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "ba35498e-3956-48c6-9dff-d78c918b5d98",
+              "leftValue": "={{ $json.qcStatus }}",
+              "rightValue": "pass",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "30a2a0a7-f648-491c-8e07-6d2462628e90",
+      "name": "QC Passed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        4640,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendAndWait",
+        "fromEmail": "={{ $('Config').first().json.settings.senderEmail }}",
+        "toEmail": "={{ $('Render Report').first().json.reviewer }}",
+        "subject": "=Approval needed: {{ $('Render Report').first().json.subject }}",
+        "message": "=Automated QC flagged this competitor brief for review.\n\nHeadline: {{ $('Render Report').first().json.headline }}\n\nChecks:\n{{ $('Render Report').first().json.checks.map(c => (c.pass ? 'PASS  ' : 'FLAG  ') + c.name + ' — ' + c.detail).join('\\n') }}\n\nApprove to send the report to the team, or Decline to stop it. The full report is in the n8n execution (Render Report → Binary).",
+        "approvalOptions": {
+          "values": {
+            "approvalType": "double"
+          }
+        },
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "21475f9a-2372-4feb-824f-66750e65a690",
+      "name": "Human Review Gate (Email)",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        4860,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "8514a95a-a7a6-42c1-9bfe-b7f6de2c4dd9",
+              "leftValue": "={{ $json.data && $json.data.approved }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "202fbfe5-e4c1-4e4a-b28a-b683602f429e",
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        5080,
+        480
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $('Config').first().json.settings.senderEmail }}",
+        "toEmail": "={{ $('Render Report').first().json.recipients }}",
+        "subject": "={{ $('Render Report').first().json.subject.replace('[REVIEW] ', '') }}",
+        "emailFormat": "html",
+        "html": "={{ $('Render Report').first().json.html }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "27d689fc-ddd9-4f27-a858-95549d1f5043",
+      "name": "Email Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        5300,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "write",
+        "fileName": "=/home/node/.n8n-files/reports/{{ $json.fileName }}.html",
+        "dataPropertyName": "report_html",
+        "options": {}
+      },
+      "id": "dcbbb44f-ab34-446b-9648-e28144c7e47e",
+      "name": "Archive Report to Disk",
+      "type": "n8n-nodes-base.readWriteFile",
+      "typeVersion": 1,
+      "position": [
+        4860,
+        120
+      ],
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "content": "## ① COLLECT\n**3 ways to run:** manual (demo) · weekly schedule (default competitor list) · **web form** (anyone enters competitors, lookback, recipient — no code).\n**Config** holds defaults, sources, thresholds, models and *all prompts*.\n**RSS:** Google News + Bing News per competitor, market query, IoT trade press.\n**Tavily:** news search per competitor + search restricted to each competitor's **own website** (newsrooms), + market query.\nFailures never stop the run — they're reported in QC.",
+        "width": 1560,
+        "height": 230,
+        "color": 4
+      },
+      "id": "5f80ceee-8fa1-4583-8135-6a83a94fd06b",
+      "name": "Note 28",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        220,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## ② CLEAN — no AI spent yet\nRelevance gate (name must appear, or official domain) · spam/stock/market-report filter · recency · cross-source near-duplicate clustering · caps · **cross-run memory**.",
+        "width": 680,
+        "height": 230,
+        "color": 5
+      },
+      "id": "e7ee1722-95fc-459d-90b8-4e7723e73ef7",
+      "name": "Note 29",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        1760,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## ③ AI + ENRICH\n**Triage agent** (cheap model): relevance, category, significance 1–5, evidence quote.\n**Score & Validate**: schema + evidence checks, fallback rules.\n**Tavily Extract**: reads the *full article* for significance ≥ 4.\n**Writer agent**: synthesis with mandatory [ID] citations.",
+        "width": 1560,
+        "height": 230,
+        "color": 6
+      },
+      "id": "b5b72e05-8c65-4084-9e23-410fb7b6552d",
+      "name": "Note 30",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        2420,
+        -80
+      ]
+    },
+    {
+      "parameters": {
+        "content": "## ④ QC + OUTPUT\nCitation guard · coverage guard · source health · enrichment check.\nQC pass → auto-send. QC fail → human approval gate.\n*(Email via SMTP (Gmail App Password) → you@example.com. Disk node: self-hosted only.)*",
+        "width": 1120,
+        "height": 230,
+        "color": 3
+      },
+      "id": "63f4d1b9-fb5a-4a3a-831c-77503aebe63e",
+      "name": "Note 31",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        4180,
+        -80
+      ]
+    }
+  ],
+  "connections": {
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Build Source Requests",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Source Requests": {
+      "main": [
+        [
+          {
+            "node": "Fetch Feeds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Feeds": {
+      "main": [
+        [
+          {
+            "node": "Parse & Normalize Feeds",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Normalize Feeds": {
+      "main": [
+        [
+          {
+            "node": "Build Tavily Queries",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Tavily Queries": {
+      "main": [
+        [
+          {
+            "node": "Tavily Enabled?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run Manually (Demo)": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekly Schedule (Mon 08:00)": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run on Demand (Form)": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tavily Enabled?": {
+      "main": [
+        [
+          {
+            "node": "Tavily Search",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Combine Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tavily Search": {
+      "main": [
+        [
+          {
+            "node": "Combine Sources",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Combine Sources": {
+      "main": [
+        [
+          {
+            "node": "Filter & Dedupe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter & Dedupe": {
+      "main": [
+        [
+          {
+            "node": "Cross-Run Dedupe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cross-Run Dedupe": {
+      "main": [
+        [
+          {
+            "node": "Build Triage Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Triage Batches": {
+      "main": [
+        [
+          {
+            "node": "AI Triage (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Triage (LLM)": {
+      "main": [
+        [
+          {
+            "node": "Score & Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score & Validate": {
+      "main": [
+        [
+          {
+            "node": "Build Extract Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Extract Request": {
+      "main": [
+        [
+          {
+            "node": "Anything to Enrich?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything to Enrich?": {
+      "main": [
+        [
+          {
+            "node": "Tavily Extract",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Attach Full Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tavily Extract": {
+      "main": [
+        [
+          {
+            "node": "Attach Full Text",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Attach Full Text": {
+      "main": [
+        [
+          {
+            "node": "AI Report Writer (LLM)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Report Writer (LLM)": {
+      "main": [
+        [
+          {
+            "node": "QC & Assemble",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QC & Assemble": {
+      "main": [
+        [
+          {
+            "node": "Render Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Render Report": {
+      "main": [
+        [
+          {
+            "node": "QC Passed?",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Archive Report to Disk",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "QC Passed?": {
+      "main": [
+        [
+          {
+            "node": "Email Report",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Human Review Gate (Email)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Human Review Gate (Email)": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Email Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Kolkata",
+    "saveManualExecutions": true
+  },
+  "pinData": {}
+}
